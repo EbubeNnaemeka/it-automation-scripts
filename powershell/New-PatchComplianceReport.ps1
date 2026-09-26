@@ -1,42 +1,59 @@
+#Requires -Modules ActiveDirectory
 <#
 .SYNOPSIS
-    Generates a patch-compliance report for all domain-joined computers.
+    Reports last-patch and last-reboot age for every enabled domain computer.
 .DESCRIPTION
-    Queries AD for enabled computer objects, checks each for its last boot
-    time and last hotfix install date via CIM, and flags any host that
-    hasn't rebooted/patched within the given threshold.
-.PARAMETER DaysThreshold
-    Number of days since last reboot before a host is flagged non-compliant.
-.PARAMETER OutputPath
-    Where to write the CSV report.
+    For each enabled computer in AD, queries the most recent hotfix install
+    date (Win32_QuickFixEngineering) and last boot time (Win32_OperatingSystem)
+    over CIM. A host is compliant when both are within their thresholds.
+    Results are written to CSV and also returned as objects.
 .EXAMPLE
-    .\New-PatchComplianceReport.ps1 -DaysThreshold 30 -OutputPath .\report.csv
+    .\New-PatchComplianceReport.ps1 -PatchDaysThreshold 30 -RebootDaysThreshold 14
 #>
-#Requires -Modules ActiveDirectory
-
+[CmdletBinding()]
 param(
-    [int]$DaysThreshold = 30,
+    [ValidateRange(1, 365)]
+    [int]$PatchDaysThreshold = 30,
+    [ValidateRange(1, 365)]
+    [int]$RebootDaysThreshold = 14,
     [string]$OutputPath = ".\patch-compliance-$(Get-Date -Format 'yyyy-MM-dd').csv"
 )
 
-$computers = Get-ADComputer -Filter { Enabled -eq $true } -Properties LastLogonDate
-$results = foreach ($c in $computers) {
+function Get-LastHotfixDate {
+    param([string]$ComputerName)
+    $dates = foreach ($hotfix in Get-CimInstance -ComputerName $ComputerName -ClassName Win32_QuickFixEngineering -ErrorAction Stop) {
+        $parsed = [datetime]::MinValue
+        # InstalledOn comes back as a string over CIM and can be empty.
+        if ($hotfix.InstalledOn -and [datetime]::TryParse([string]$hotfix.InstalledOn, [ref]$parsed)) { $parsed }
+    }
+    $dates | Sort-Object -Descending | Select-Object -First 1
+}
+
+$now = Get-Date
+$computers = Get-ADComputer -Filter 'Enabled -eq $true'
+
+$results = foreach ($computer in $computers) {
     try {
-        $os = Get-CimInstance -ComputerName $c.Name -ClassName Win32_OperatingSystem -ErrorAction Stop
-        $lastBoot = $os.LastBootUpTime
-        $daysSinceBoot = (New-TimeSpan -Start $lastBoot -End (Get-Date)).Days
+        $lastBoot = (Get-CimInstance -ComputerName $computer.Name -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $lastPatch = Get-LastHotfixDate -ComputerName $computer.Name
+        $daysSinceBoot = [int]($now - $lastBoot).TotalDays
+        $daysSincePatch = if ($lastPatch) { [int]($now - $lastPatch).TotalDays } else { $null }
 
         [PSCustomObject]@{
-            ComputerName   = $c.Name
+            ComputerName   = $computer.Name
+            LastPatchDate  = $lastPatch
+            DaysSincePatch = $daysSincePatch
             LastBootUpTime = $lastBoot
             DaysSinceBoot  = $daysSinceBoot
-            Compliant      = $daysSinceBoot -le $DaysThreshold
-            Status         = "Reachable"
+            Compliant      = ($null -ne $daysSincePatch) -and ($daysSincePatch -le $PatchDaysThreshold) -and ($daysSinceBoot -le $RebootDaysThreshold)
+            Status         = 'Reachable'
         }
     }
     catch {
         [PSCustomObject]@{
-            ComputerName   = $c.Name
+            ComputerName   = $computer.Name
+            LastPatchDate  = $null
+            DaysSincePatch = $null
             LastBootUpTime = $null
             DaysSinceBoot  = $null
             Compliant      = $false
@@ -46,7 +63,6 @@ $results = foreach ($c in $computers) {
 }
 
 $results | Export-Csv -Path $OutputPath -NoTypeInformation
-$nonCompliant = ($results | Where-Object { -not $_.Compliant }).Count
-
-Write-Host "Report written to $OutputPath"
-Write-Host "$nonCompliant of $($results.Count) hosts flagged non-compliant (threshold: $DaysThreshold days)"
+Write-Verbose "Report written to $OutputPath"
+Write-Verbose "$(@($results | Where-Object { -not $_.Compliant }).Count) of $(@($results).Count) hosts non-compliant"
+$results

@@ -1,13 +1,12 @@
 ---
-# Cross-platform patch status inventory: reports pending updates on both
-# Windows and Linux hosts in a mixed environment, into one combined report.
+# Patch-status inventory across Linux and Windows hosts.
 # Run: ansible-playbook -i inventory.ini site.yml
 
-- name: Check patch status on Linux hosts
+- name: Check patch status on Debian/Ubuntu hosts
   hosts: linux
-  gather_facts: false
+  gather_facts: true
   tasks:
-    - name: Check for pending apt upgrades
+    - name: List upgradable packages
       ansible.builtin.command: apt list --upgradable
       register: apt_result
       changed_when: false
@@ -15,18 +14,20 @@
 
     - name: Report pending upgrade count
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ (apt_result.stdout_lines | length) - 1 }} packages pending"
+        msg: >-
+          {{ inventory_hostname }}: {{ apt_result.stdout_lines | select('search', '\[upgradable') | list | length }}
+          packages pending
       when: ansible_facts['os_family'] == "Debian"
 
 - name: Check patch status on Windows hosts
   hosts: windows
   gather_facts: false
   tasks:
-    - name: Query pending Windows updates
+    - name: Search for missing Windows updates
       ansible.windows.win_updates:
         state: searched
       register: win_result
 
     - name: Report pending update count
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ win_result.updates | length }} updates pending"
+        msg: "{{ inventory_hostname }}: {{ win_result.found_update_count }} updates pending"

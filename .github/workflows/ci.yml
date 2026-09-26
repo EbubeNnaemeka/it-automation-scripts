@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  powershell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install PSScriptAnalyzer and Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer, Pester -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Lint
+        shell: pwsh
+        run: |
+          $issues = Invoke-ScriptAnalyzer -Path powershell -Recurse -Severity Warning, Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { throw "$($issues.Count) PSScriptAnalyzer issue(s)" }
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'tests'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c
+
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Ansible
+        run: |
+          pip install ansible-core ansible-lint
+          ansible-galaxy collection install ansible.windows
+      - name: Lint
+        working-directory: ansible
+        run: ansible-lint site.yml
+      - name: Run Linux play against the runner
+        working-directory: ansible
+        run: ansible-playbook -i tests/inventory.local.ini site.yml

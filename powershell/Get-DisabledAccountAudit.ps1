@@ -1,30 +1,32 @@
+#Requires -Modules ActiveDirectory
 <#
 .SYNOPSIS
-    Audits disabled AD accounts that still hold active group memberships.
+    Finds disabled AD user accounts that still hold group memberships.
 .DESCRIPTION
-    A common security/compliance finding: accounts get disabled on offboarding
-    but are never removed from privileged groups. This script flags that gap.
+    Accounts are often disabled at offboarding but never removed from their
+    groups. Disabled accounts in privileged groups are flagged high priority.
 .EXAMPLE
     .\Get-DisabledAccountAudit.ps1 | Format-Table -AutoSize
 #>
-#Requires -Modules ActiveDirectory
+[CmdletBinding()]
+param(
+    [string[]]$PrivilegedGroupPattern = @('Admins', 'Operators', 'Enterprise', 'Schema')
+)
 
-$disabledUsers = Get-ADUser -Filter { Enabled -eq $false } -Properties MemberOf
+$pattern = ($PrivilegedGroupPattern | ForEach-Object { [regex]::Escape($_) }) -join '|'
 
-foreach ($user in $disabledUsers) {
-    if ($user.MemberOf.Count -gt 0) {
-        $groups = $user.MemberOf | ForEach-Object { (Get-ADGroup $_).Name }
+foreach ($user in Get-ADUser -Filter 'Enabled -eq $false' -Properties MemberOf) {
+    if (-not $user.MemberOf) { continue }
 
-        [PSCustomObject]@{
-            SamAccountName = $user.SamAccountName
-            Name           = $user.Name
-            GroupCount     = $groups.Count
-            Groups         = ($groups -join "; ")
-            Recommendation = if ($groups -match "Admins") {
-                "HIGH PRIORITY - privileged group membership on disabled account"
-            } else {
-                "Remove from groups during next cleanup cycle"
-            }
-        }
+    $groups = @($user.MemberOf | ForEach-Object { (Get-ADGroup -Identity $_).Name })
+    $privileged = @($groups | Where-Object { $_ -match $pattern })
+
+    [PSCustomObject]@{
+        SamAccountName   = $user.SamAccountName
+        Name             = $user.Name
+        GroupCount       = $groups.Count
+        Groups           = $groups -join '; '
+        PrivilegedGroups = $privileged -join '; '
+        Priority         = if ($privileged.Count -gt 0) { 'High' } else { 'Normal' }
     }
 }
